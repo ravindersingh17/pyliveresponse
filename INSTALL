@@ -1,0 +1,35 @@
+Requirements:
+------------------
+To install Live Response from source, the following requirements must be met:
+
+Python version>=2.5
+Qt version>=4.2
+PyQt4
+
+
+
+Installation instructions:
+---------------------------
+
+To install :
+
+python setup.py build
+
+python setup.py install
+
+You may also create a launcher for this application by using the path where LiveResponse is installed (usually /usr/bin, the setup.py file will provide you this information)
+
+
+Testing the install:
+-----------------------
+Run the command:
+
+liveresponse
+
+If installation was successful, you should see the Live Response window on your screen
+
+
+Problems during install:
+-------------------------
+Please check that all the installation requirements are met, if you still face any problems, you may send an email to ravinder.singh@kayako.com with the associated error logs.
+

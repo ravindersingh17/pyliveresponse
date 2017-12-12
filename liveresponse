@@ -1,0 +1,955 @@
+#!/usr/bin/python
+    
+#    Cross Platform Desktop application for Kayako Live Response
+#    Copyright (C) 2008  Kayako Infotech Ltd.
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+import sys,os
+
+
+from PyQt4 import QtCore,QtGui
+from lrmodules.customQtClasses import *
+
+from lrmodules.lrMainWindow import Ui_lrMainWindow
+from lrmodules.lrChatWindow import Ui_lrChatWindow
+from lrmodules.lrdialogs import *
+import pickle
+
+
+from lrmodules import serveractions,lrxmlparser
+import random,base64,re
+from time import *
+
+
+
+def converttoentity(message):
+	#message=message.encode('utf8')
+	
+	chatmessage=''
+	for char in message:
+		chatmessage=chatmessage+'&#'+str(ord(char))+';'
+	
+	return chatmessage
+
+
+
+
+		
+class lrsession(QtCore.QObject):
+	def __init__(self,loginValues,parent=None):
+        	QtCore.QObject.__init__(self,parent)
+	
+		#############################################
+		##Data capture section, 
+	
+		product_url,username,password=loginValues
+		if product_url[-1]!='/':
+			product_url=product_url+'/'
+		username=username.lower()
+		self.username=username
+		default_status='1'
+		self.poll_time=10
+		###########################################
+
+
+		############################################
+		##Initializing the server,xmlparser
+		
+		randno=str(random.random())[2:]+str(random.random())[2:5]
+		self.serverhandler=serveractions.serverengine(product_url,username,password,default_status,randno)
+		self.xmlhandler=lrxmlparser.lrxmlengine()
+		self.lastfetchtime=0.0
+		self.chats={}
+		##########################################
+		
+		
+	def login(self):
+		loggedin=0
+		serverresponse=self.serverhandler.login()
+		
+		if serverresponse['result']=='fail':
+			self.emit(QtCore.SIGNAL("errorSignal"),serverresponse['error'])
+			if self.logmessage('error','Unable to login',serverresponse['error'])==-1:
+				self.emit(QtCore.SIGNAL("errorSignal"),"Unable to write to log file\nDumping debug data to terminal")
+				print serverresponse['error']
+			
+		else:
+			
+			sessionvariables=self.xmlhandler.parselogindata(serverresponse['data'])
+			if sessionvariables[0]==-1:
+				self.emit(QtCore.SIGNAL("errorSignal"),"Login Failed\n"+sessionvariables[1])
+				if self.logmessage('error','Unable to login',sessionvariables[1]+'\n Server sent this data\n'+serverresponse['data'])==-1:
+					self.emit(QtCore.SIGNAL("errorSignal"),"Unable to write to log file\nDumping debug data to terminal")
+					print sessionvariables[1]+'\n Server sent this data\n'+serverresponse['data']
+			else:
+				 loggedin=1
+		if loggedin==1:
+			self.serverhandler.setsessionvariables(sessionvariables[1],sessionvariables[2],sessionvariables[3])
+			self.sessionid=sessionvariables[1]
+			self.staffsessionid=sessionvariables[2]
+			self.predefined=sessionvariables[4]
+			self.timer = self.startTimer(500)
+			if self.logmessage('info','Logged in successfully',"")==-1:
+				self.emit(QtCore.SIGNAL("errorSignal"),"Unable to write to log file\nDumping debug data to terminal")
+				print "Logged in Successfully"
+			return 1
+		else:
+			return 0
+			
+	def endsession(self):
+		
+		self.serverhandler.logout()
+		
+		while 1:
+			serverresponse=self.serverhandler.getserverdata()
+			if serverresponse!='':
+				if serverresponse['typeofrequest']=='logout':
+					return
+				sleep(0.2)
+		if self.logmessage('info','Logged out successfully',"")==-1:
+			self.emit(QtCore.SIGNAL("errorSignal"),"Unable to write to log file\nDumping debug data to terminal")
+			print "Logged out Successfully"
+				
+	def endchat(self,chatsessionid):
+		self.serverhandler.chatendsession(chatsessionid)
+		del(self.chats[chatsessionid])
+		
+				
+	def sendchatmessage(self,message,chatsessionid):
+		chatmessage=converttoentity(message)
+		self.serverhandler.sendmessage(base64.b64encode(chatmessage),chatsessionid)
+	
+	def pushpage(self,chatsessionid,url):
+		self.serverhandler.pushpagevisitor(chatsessionid,url)
+		
+	def pushimage(self,chatsessionid,url):
+		self.serverhandler.pushimagevisitor(chatsessionid,url)
+		
+	def startchat(self,chatsessionid):
+		self.serverhandler.startchat(chatsessionid,self.parseddata['pendingchat'][chatsessionid]['visitorsessionid'],
+		self.parseddata['pendingchat'][chatsessionid]['displayname'])
+				
+	def refusechat(self,chatsessionid):
+		self.serverhandler.refusechat(chatsessionid)
+				
+	def stafftostaffchat(self,staffusername):
+		self.serverhandler.startstafftostaffchat(self.parseddata['staff'][staffusername]['staffid'],staffusername)
+				
+	def getonlinestafflist(self):
+		onlinestafflist=[]
+		
+		for staffname in self.parseddata['staff']:
+			if self.parseddata['staff'][staffname]['status']=='1':
+				onlinestafflist.append({'staffname':self.parseddata['staff'][staffname]['staffname'],
+				'staffid':self.parseddata['staff'][staffname]['staffid']})
+		return onlinestafflist
+			
+	def transferchat(self,chatsessionid,staffid):
+		self.serverhandler.transferchat(chatsessionid,staffid)
+		
+	def emailchat(self,chatsessionid,email):
+		self.serverhandler.emailchat(chatsessionid,email)
+		
+	def gethistory(self,visitorsessionid):
+		return self.serverhandler.gethistory(visitorsessionid)
+	
+	def changestatus(self,newstatus):
+		self.serverhandler.status=newstatus
+			
+	def requestchat(self,visitorsessionid):
+		self.serverhandler.requestchat(visitorsessionid)
+					
+	def forcechat(self,visitorsessionid):
+		self.serverhandler.forcechat(visitorsessionid)
+	
+	def getchatstatus(self,visitorsessionid):
+		self.serverhandler.getchatstatus(visitorsessionid)
+			
+	def logmessage(self,typeofmessage,errormessage,details):
+		logentry={'type':typeofmessage,
+		'errormessage':errormessage,
+		'details':details,
+		'timestamp':time()}
+		
+		try:
+			logfile=open(os.path.expanduser('~')+'/pyliveresponse_debug.dat','ab')
+		except:
+			return -1
+		pickle.dump(logentry,logfile)
+		logfile.close()
+		return 1
+			
+
+    	def timerEvent(self, ev):
+		
+		#################################################
+		##Get visitor data,every poll_time seconds
+		curtime=time()
+		if curtime-self.lastfetchtime>=self.poll_time:
+			self.lastfetchtime=curtime
+			self.serverhandler.fetchvisitors()
+		
+		##################################################
+		##Get server response
+		serverresponse=self.serverhandler.getserverdata()
+		if serverresponse!='':
+			if serverresponse['result']=='success':
+				##Fetch visitor data
+				if serverresponse['typeofrequest']=='visitor':
+					
+					parseddata=self.xmlhandler.parsevisitordata(serverresponse['data'])
+					if parseddata[0]==-1:
+						self.emit(QtCore.SIGNAL("errorSignal"),"Unknown server response\n"+parseddata[1])
+						if self.logmessage('error','Unknown Server Response',parseddata[1]+"<br/>Server Sent this data<br/>"+serverresponse['data'])==-1:
+							self.emit(QtCore.SIGNAL("errorSignal"),"Unable to write to log file\nDumping debug data to terminal")
+							print 'Unknown Server Response--'+parseddata[1]+"\nServer Sent this data\n"+serverresponse['data']
+            				else:
+						self.parseddata=parseddata[1]
+						self.staffname=self.parseddata['staff'][self.username]['staffname']
+					
+									
+						##Transferred/Staff chats, may choose to ask user however going for defaults now
+						if 'chatexec' in self.parseddata.keys():
+							
+							for transferredchat in self.parseddata['chatexec']:
+								self.serverhandler.startchat(self.parseddata['chatexec'][transferredchat]['chatsessionid'],
+								self.parseddata['chatexec'][transferredchat]['visitorsessionid'],
+								self.parseddata['chatexec'][transferredchat]['caption'])
+								##Remove the chat we have started from list of pending chats
+								del(self.parseddata['pendingchat'][self.parseddata['chatexec'][transferredchat]['chatsessionid']])
+							
+						self.emit(QtCore.SIGNAL("visitorDataSignal"),self.parseddata)	
+				
+				
+				#Chat has started
+				elif serverresponse['typeofrequest']=='startchat':
+					chaturl=self.xmlhandler.parsestartchatdata(serverresponse['data'])
+					if chaturl[0]==-1:
+						self.emit(QtCore.SIGNAL("errorSignal"),"Unable to load chat data")
+						if self.logmessage('error','Error with chat data',chaturl[1]+"<br/>Server Sent this data<br/>"+serverresponse['data'])==-1:
+							self.emit(QtCore.SIGNAL("errorSignal"),"Unable to write to log file\nDumping debug data to terminal")
+							print 'Unknown Server Response'+chaturl[1]+"\nServer Sent this data\n"+serverresponse['data']
+					else:
+						newchatsessionid=serverresponse['identifier'][0]
+						self.chats[newchatsessionid]={'chaturl':chaturl[1][0],
+						'lastrefreshtime':0.0,
+						'status':'2',
+						'visitorsessionid':serverresponse['identifier'][1]}
+						self.emit(QtCore.SIGNAL("chatStarted"),newchatsessionid,self.staffname,serverresponse['identifier'][1],serverresponse['identifier'][2],chaturl[1][1],self.predefined)
+					
+				elif serverresponse['typeofrequest']=='stafftostaff':
+					stafftostaffchatid=self.xmlhandler.getstafftostaffchatid(serverresponse['data'])
+					if stafftostaffchatid[0]==-1:
+						self.emit(QtCore.SIGNAL("errorSignal"),"Error in starting chat")
+						if self.logmessage('error','Error with chat data',stafftostaffchatid[1]+"<br/>Server Sent this data<br/>"+serverresponse['data'])==-1:
+							self.emit(QtCore.SIGNAL("errorSignal"),"Unable to write to log file\nDumping debug data to terminal")
+							print 'Unknown Server Response'+stafftostaffchatid[1]+"<br/>Server Sent this data<br/>"+serverresponse['data']
+					else:
+						self.serverhandler.startchat(stafftostaffchatid[1],'',
+						self.parseddata['staff'][serverresponse['identifier'][1]]['staffname'])
+						
+						
+				elif serverresponse['typeofrequest']=='visitorhistory':
+					self.emit(QtCore.SIGNAL("historySignal"),serverresponse['identifier'],serverresponse['data'])
+					
+				elif serverresponse['typeofrequest']=='chatstatus':
+					self.emit(QtCore.SIGNAL("chatStatus"),serverresponse['identifier'],serverresponse['data'])
+					
+				##Server sent some chatdata			
+				elif serverresponse['typeofrequest']=='chatrefresh':
+					incomingchatsessionid=serverresponse['identifier']
+					#Check first if chat exists
+					if incomingchatsessionid in self.chats:
+						incomingchatdata=self.xmlhandler.parsechatdata(serverresponse['data'])
+						if incomingchatdata[0]==-1:
+							self.emit(QtCore.SIGNAL("errorSignal"),"Unknown server response")
+							if self.logmessage('error','Error with chat data',incomingchatdata[1]+"<br/>Server Sent this data<br/>"+serverresponse['data'])==-1:
+								self.emit(QtCore.SIGNAL("errorSignal"),"Unable to write to log file\nDumping debug data to terminal")
+								print 'Unknown Server Response'+incomingchatdata[1]+"<br/>Server Sent this data<br/>"+serverresponse['data']
+						else:
+							incomingchatdata=incomingchatdata[1]
+						
+							for incomingmessage in incomingchatdata:
+								if incomingmessage['type']=='chatstatus':
+									self.chats[incomingchatsessionid]['status']=incomingmessage['status']
+								
+								elif incomingmessage['type']=='clientmessage':
+									incomingmessage['message']=unicode(base64.b64decode(incomingmessage['message']),'iso-8859-1')
+								
+									clientname=incomingmessage['clientname']
+									messagetodisplay=incomingmessage['message']
+									self.emit(QtCore.SIGNAL("displayChatMessage"),incomingchatsessionid,messagetodisplay,clientname)
+								elif incomingmessage['type']=='message':
+									self.emit(QtCore.SIGNAL("displayChatMessage"),incomingchatsessionid,incomingmessage['message'])
+			else:
+				self.emit(QtCore.SIGNAL("errorSignal"),serverresponse['error'])
+				if self.logmessage('error','Connection problem with the server',serverresponse['error'])==-1:
+					self.emit(QtCore.SIGNAL("errorSignal"),"Unable to write to log file\nDumping debug data to terminal")
+					print serverresponse['error']
+		
+		###########################################
+		##Chat loop i.e fetch chat data
+		for fetchchat in self.chats:
+			curtime=time()
+			if curtime-self.chats[fetchchat]['lastrefreshtime']>6:
+				self.serverhandler.refreshchat(self.chats[fetchchat]['chaturl'],fetchchat)
+				self.chats[fetchchat]['lastrefreshtime']=curtime
+						
+						
+class winlrChatWindow(QtGui.QMainWindow):
+	def __init__(self,chatsessionid,parent=None,flags=None):
+		QtGui.QMainWindow.__init__(self,parent,flags)
+		self.ui=Ui_lrChatWindow()
+		self.ui.setupUi(self)
+		self.controller=None
+		self.chatsessionid=chatsessionid
+		self.staffname=None
+		
+		
+		
+			
+			
+		#############################################
+		##Menu
+		self.fileMenu=self.menuBar().addMenu("&File")
+		self.actionsMenu=self.menuBar().addMenu("&Actions")
+		self.cannedMenu=self.menuBar().addMenu("&Canned")
+		self.transferMenu=self.menuBar().addMenu("&Transfer")
+		
+		
+		self.exitAction=QtGui.QAction(self)
+        	self.exitAction.setText("Leave Chat")
+		self.connect(self.exitAction,QtCore.SIGNAL("activated()"),self.close)
+		
+		self.emailAction=QtGui.QAction(self)
+        	self.emailAction.setText("Email")
+        	self.connect(self.emailAction,QtCore.SIGNAL("activated()"),self.emailChat)
+		
+			
+		self.saveAction=QtGui.QAction(self)
+        	self.saveAction.setText("Save")
+		self.connect(self.saveAction,QtCore.SIGNAL("activated()"),self.saveChat)
+			
+		self.historyAction=QtGui.QAction(self)
+		self.historyAction.setText("View History")
+		self.connect(self.historyAction,QtCore.SIGNAL("activated()"),self.getHistory)
+		
+		self.pushURLAction=QtGui.QAction(self)
+		self.pushURLAction.setText("Push URL")
+		self.connect(self.pushURLAction,QtCore.SIGNAL("activated()"),self.pushPage)
+		
+		self.pushImageAction=QtGui.QAction(self)
+		self.pushImageAction.setText("Push Image")
+		self.connect(self.pushImageAction,QtCore.SIGNAL("activated()"),self.pushImage)
+		
+		
+		self.fileMenu.addAction(self.emailAction)
+		self.fileMenu.addAction(self.saveAction)
+		self.fileMenu.addAction(self.historyAction)
+		self.fileMenu.addSeparator()
+		self.fileMenu.addAction(self.exitAction)
+		
+		self.actionsMenu.addAction(self.pushURLAction)
+		self.actionsMenu.addAction(self.pushImageAction)
+		
+		
+		self.ui.chatInputBox.setReadOnly(True)
+		
+		################################################
+		
+		###############################################
+		#Colors
+		self.staffnameColor='#00aa00'
+		self.clientnameColor='#0000aa'
+		self.servermessageColor='#aa0000'
+		################################################
+		
+		
+		
+	def closeEvent(self,closeEventHandle):
+		self.controller.endchat(self.chatsessionid)
+		self.emit(QtCore.SIGNAL("chatWindowClosed"),self.chatsessionid)
+		closeEventHandle.accept()
+		
+	def sendChatMessage(self):
+		chatmessage=self.ui.chatInputBox.text()
+		self.ui.chatTextArea.append("<font color="+self.staffnameColor+">["+self.staffname+"]</font> "+chatmessage+'\n')
+		self.controller.sendchatmessage(unicode(chatmessage),self.chatsessionid)
+		self.ui.chatInputBox.clear()
+		
+	def displayMessage(self,message,clientname=''):
+		if clientname!='':
+			self.ui.chatTextArea.append("<font color="+self.clientnameColor+">["+clientname+"]</font> "+message+'\n')
+		else:
+			self.ui.chatTextArea.append("<font color="+self.servermessageColor+">*-"+message+"</font>\n")
+			
+	def transferChat(self,action):
+		staffid=str(action.property('staffid').toString())
+		
+		self.controller.transferchat(self.chatsessionid,staffid)
+		
+	def createTransferMenu(self):
+		onlineStaff=self.controller.getonlinestafflist()
+		self.transferActionGroup=QtGui.QActionGroup(self)
+		self.transferMenu.clear()
+		
+		for staff in onlineStaff:
+			if staff['staffname']!=self.staffname:
+				transferAction=QtGui.QAction(self.transferActionGroup)
+				transferAction.setText(staff['staffname'])
+				transferAction.setProperty('staffid',QtCore.QVariant(staff['staffid']))
+				self.transferMenu.addAction(transferAction)
+				
+		self.connect(self.transferActionGroup,QtCore.SIGNAL("triggered(QAction *)"),self.transferChat)
+				
+	def createCannedMenu(self,parentMenu,predefined):
+		for response in predefined:
+			if response['type']=='category':
+				childMenu=parentMenu.addMenu(response['title'])
+				self.createCannedMenu(childMenu,response['child'])
+			elif response['type']=='entry':
+				if response['entrytype']=='text':
+					
+					entryAction=QtGui.QAction(self.cannedActionGroup)
+					entryAction.setText(response['title'])
+					entryAction.setProperty('data',QtCore.QVariant(response['data']))
+					parentMenu.addAction(entryAction)
+					
+	def emailChat(self):
+		emailAddress=QtGui.QInputDialog.getText(self,"Email Address","Email the conversation to this address:")
+		if emailAddress[1]:
+			self.controller.emailchat(self.chatsessionid,str(emailAddress[0]))
+			QtGui.QMessageBox.information(self,"Live Response","Successfully Emailed Chat")
+			
+			
+	def pushPage(self):
+		url=QtGui.QInputDialog.getText(self,"Enter URL","Enter the URL you want to push To the visitor")
+		if url[1]:
+			self.controller.pushpage(self.chatsessionid,str(url[0]))
+			QtGui.QMessageBox.information(self,"Live Response","Successfully Pushed URL")
+			
+	def pushImage(self):
+		url=QtGui.QInputDialog.getText(self,"Enter URL","Enter the URL of the Image you want to push To the visitor")
+		if url[1]:
+			self.controller.pushimage(self.chatsessionid,str(url[0]))
+			QtGui.QMessageBox.information(self,"Live Response","Successfully Pushed Image")
+			
+	def getHistory(self):
+		historyURL=self.controller.gethistory(self.visitorsessionid)
+		import webbrowser
+		webbrowser.open_new(historyURL)
+			
+	def displayHistory(self,historyData):
+		self.historyTextArea.setText(historyData)
+		
+	def displayCanned(self,cannedAction):
+		self.ui.chatInputBox.setText(cannedAction.property('data').toString())
+		
+	def saveChat(self):
+		saveFileName=QtGui.QFileDialog.getSaveFileName(self,"Save File As","","*.html")
+		try:
+			chatTranscriptFile=open(saveFileName,'w')
+			chatTranscriptFile.write(unicode(self.ui.chatTextArea.text()))
+			chatTranscriptFile.close()
+		except IOError:
+			self.errorMessage("Unable to create file")
+		
+	def setSessionProperties(self,controller,visitorsessionid,staffname,displayname,initdata,predefined):
+		##initdata=username, email html div
+		
+		self.controller=controller
+		self.visitorsessionid=visitorsessionid
+		self.staffname=staffname
+		self.historyAction.setEnabled(True)
+		self.emailAction.setEnabled(True)
+		self.saveAction.setEnabled(True)
+		self.ui.chatInputBox.setReadOnly(False)
+		self.setWindowTitle(displayname)
+		
+		self.ui.chatTextArea.setText(initdata.decode('utf8'))
+		self.cannedActionGroup=QtGui.QActionGroup(self)
+		self.createCannedMenu(self.cannedMenu,predefined[0]['child'])
+		QtCore.QObject.connect(self.ui.chatInputBox,QtCore.SIGNAL("returnPressed()"),self.sendChatMessage)
+		QtCore.QObject.connect(self.ui.sendButton,QtCore.SIGNAL("clicked()"),self.ui.chatInputBox,QtCore.SIGNAL("returnPressed()"))
+		QtCore.QObject.connect(self.transferMenu,QtCore.SIGNAL("aboutToShow()"),self.createTransferMenu)
+		self.connect(self.cannedActionGroup,QtCore.SIGNAL("triggered(QAction *)"),self.displayCanned)
+		
+class winlrMainWindow(QtGui.QMainWindow):
+	
+	def __init__(self,parent=None):
+		
+		QtGui.QMainWindow.__init__(self,parent)
+		self.ui=Ui_lrMainWindow()
+		self.ui.setupUi(self)
+		self.loginData={}
+		self.chatWindows={}
+		self.controller=None
+		self.loggedInAccount=''
+		self.getLoginData()
+		
+		
+		
+		###########################################
+		##Menu
+		self.fileMenu=self.menuBar().addMenu("&File")
+		self.settingsMenu=self.menuBar().addMenu("&Settings")
+		self.helpMenu=self.menuBar().addMenu("&Help")
+		self.statusMenu=self.fileMenu.addMenu("&Status")
+		
+		
+		# Define actions
+	        self.exitAction=QtGui.QAction(self)
+        	self.exitAction.setText("Quit")
+        	self.connect(self.exitAction,QtCore.SIGNAL("activated()"),self.quitLR)
+		
+		self.logAction=QtGui.QAction(self)
+		self.logAction.setText("View Debug Log")
+		self.connect(self.logAction,QtCore.SIGNAL("activated()"),self.showLogWindow)
+		
+		self.logoutAction=QtGui.QAction(self)
+		self.logoutAction.setText("Logout")
+		self.logoutAction.setEnabled(False)
+		self.connect(self.logoutAction,QtCore.SIGNAL("activated()"),self.logout)
+		
+		self.onlineAction=QtGui.QAction(self)
+		self.onlineAction.setText("Online")
+		self.onlineAction.setEnabled(False)
+		self.connect(self.onlineAction,QtCore.SIGNAL("activated()"),self.changeStatusOnline)
+		self.statusMenu.addAction(self.onlineAction)
+		
+		self.awayAction=QtGui.QAction(self)
+		self.awayAction.setText("Away")
+		self.awayAction.setEnabled(False)
+		self.connect(self.awayAction,QtCore.SIGNAL("activated()"),self.changeStatusAway)
+		self.statusMenu.addAction(self.awayAction)
+		
+		
+        	self.loginMenu=self.fileMenu.addMenu("&Login")
+        	self.fileMenu.addAction(self.logoutAction)
+		self.fileMenu.addSeparator()
+		self.fileMenu.addAction(self.logAction)
+		self.fileMenu.addSeparator()
+		self.fileMenu.addAction(self.exitAction)
+		
+        	self.accountDataAction=QtGui.QAction(self)
+		self.accountDataAction.setText("Accounts")
+		self.connect(self.accountDataAction,QtCore.SIGNAL("activated()"),self.loginDataDialog)
+		self.settingsMenu.addAction(self.accountDataAction)
+		
+		self.aboutAction=QtGui.QAction(self)
+		self.aboutAction.setText("About")
+		self.connect(self.aboutAction,QtCore.SIGNAL("activated()"),self.showAboutDialog)
+		self.helpMenu.addAction(self.aboutAction)
+		
+		
+		
+		##End Menu
+		################################################
+		###############################################
+		##Create a splitter
+		self.visitorAreaLayout=QtGui.QVBoxLayout(self.ui.visitorAreaFrame)
+		self.visitorAreaSplitter=QtGui.QSplitter(self.ui.visitorAreaFrame)
+		self.visitorAreaLayout.addWidget(self.visitorAreaSplitter)
+		self.visitorAreaSplitter.setOrientation(QtCore.Qt.Vertical)
+		self.visitorAreaSplitter.addWidget(self.ui.visitorTableWidget)
+		self.visitorAreaSplitter.addWidget(self.ui.visitorTabWidget)
+		
+		
+		
+		
+		##Header of visitor Pane
+		self.ui.visitorTableWidget.horizontalHeader().setResizeMode(QtGui.QHeaderView.ResizeToContents)
+		self.ui.visitorTableWidget.verticalHeader().hide()
+		###############################################
+		#Images
+		self.staffPixmapOnline=QtGui.QPixmap(18,18)
+		self.staffPixmapOnline.fill()
+		painter=QtGui.QPainter(self.staffPixmapOnline)
+		brush=QtGui.QBrush(QtGui.QColor('green'))
+		painter.setBrush(brush)
+		painter.drawEllipse(3,3,12,12)
+		self.onlineIcon=QtGui.QIcon(self.staffPixmapOnline)
+		
+		self.staffPixmapAway=QtGui.QPixmap(18,18)
+		self.staffPixmapAway.fill()
+		painter=QtGui.QPainter(self.staffPixmapAway)
+		brush=QtGui.QBrush(QtGui.QColor('orange'))
+		painter.setBrush(brush)
+		painter.drawEllipse(3,3,12,12)
+		self.awayIcon=QtGui.QIcon(self.staffPixmapAway)
+		
+		self.staffPixmapOffline=QtGui.QPixmap(18,18)
+		self.staffPixmapOffline.fill()
+		painter=QtGui.QPainter(self.staffPixmapOffline)
+		brush=QtGui.QBrush(QtGui.QColor('gray'))
+		painter.setBrush(brush)
+		painter.drawEllipse(3,3,12,12)
+		self.offlineIcon=QtGui.QIcon(self.staffPixmapOffline)
+		
+		###############################################
+		
+		##############################################
+		##TrayIcon
+		paths=sys.path
+		paths.append(sys.prefix)
+		iconpath=None
+		for p in paths:
+			if os.path.exists(p+'/resources/lr.png'):
+				iconpath=p+'/resources/lr.png'
+		if iconpath:
+			self.trayIcon=QtGui.QSystemTrayIcon(QtGui.QIcon(iconpath))
+		else:
+			self.errorMessage("Unable To load system tray Icon")
+		self.trayMenu=QtGui.QMenu()
+		self.showMainWindowAction=QtGui.QAction(self)
+		self.showMainWindowAction.setText("Show Live Response")
+		self.connect(self.showMainWindowAction,QtCore.SIGNAL("activated()"),self.showMainWindow)
+		self.connect(self.trayIcon,QtCore.SIGNAL("activated()"),self.showMainWindow)
+		self.trayMenu.addAction(self.showMainWindowAction)
+		self.trayMenu.addMenu(self.statusMenu)
+		self.trayMenu.addAction(self.exitAction)
+		self.trayIcon.setContextMenu(self.trayMenu)
+		self.trayIcon.show()
+		QtCore.QObject.connect(self.trayIcon,QtCore.SIGNAL("messageClicked()"),self.trayMessageClicked)
+		
+		########################################
+		
+		#########################################
+		##Context Menus
+		self.ui.pendingChatList.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+		QtCore.QObject.connect(self.ui.pendingChatList,QtCore.SIGNAL("customContextMenuRequested(QPoint)"),
+		self.createPendingChatContextMenu)
+		
+		self.ui.visitorTableWidget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+		QtCore.QObject.connect(self.ui.visitorTableWidget,QtCore.SIGNAL("customContextMenuRequested(QPoint)"),
+		self.createVisitorContextMenu)
+		########################################
+		##Connecting the signals
+		QtCore.QObject.connect(self.ui.pendingChatList,QtCore.SIGNAL("itemDoubleClicked(QListWidgetItem *)"),self.startChat)
+		QtCore.QObject.connect(self.ui.staffList,QtCore.SIGNAL("itemDoubleClicked(QListWidgetItem *)"),self.startStaffToStaffChat)
+		QtCore.QObject.connect(self.ui.visitorTableWidget,QtCore.SIGNAL("itemClicked(QTableWidgetItem *)"),self.visitorSelected)
+		QtCore.QObject.connect(self.loginMenu,QtCore.SIGNAL("aboutToShow()"),self.createLoginMenu)
+		QtCore.QObject.connect(self.ui.visitorTabWidget,QtCore.SIGNAL("currentChanged(int)"),self.updateVisitorTabWidget)
+	
+			
+	def changeStatusOnline(self):
+		self.controller.changestatus('1')
+		self.onlineAction.setEnabled(False)
+		self.awayAction.setEnabled(True)
+		
+		
+	def changeStatusAway(self):
+		self.controller.changestatus('3')
+		self.onlineAction.setEnabled(True)
+		self.awayAction.setEnabled(False)
+	
+	def chatRefused(self):
+		if QtGui.QMessageBox.warning(self,"Refuse Chat?","Are you sure you want to refuse chat for this visitor?","&Yes","&No")==0:
+			self.controller.refusechat(self.ui.pendingChatList.currentItem().sessionid)
+					
+	def chatStarted(self,chatsessionid,staffname,visitorsessionid,displayname,initdata,predefined):
+		self.chatWindows[chatsessionid]=winlrChatWindow(chatsessionid,self,QtCore.Qt.Window)
+		
+		self.chatWindows[chatsessionid].setSessionProperties(self.controller,visitorsessionid,staffname,displayname,initdata,predefined)
+		self.chatWindows[chatsessionid].show()
+			
+		self.connect(self.chatWindows[chatsessionid],QtCore.SIGNAL("chatWindowClosed"),self.endChat)
+	
+	
+	def closeEvent(self,closeEventHandle):
+		self.hide()
+		closeEventHandle.ignore()	
+		
+			
+			
+	def createLoginMenu(self):
+		self.loginActionGroup=QtGui.QActionGroup(self)
+		self.loginMenu.clear()
+		
+		for account in self.loginData:
+			loginAction=QtGui.QAction(self.loginActionGroup)
+			loginAction.setText(account)
+			loginAction.setProperty('id',QtCore.QVariant('test'))
+			self.loginMenu.addAction(loginAction)
+			if self.loggedInAccount==account:
+				loginAction.setEnabled(False)
+		self.connect(self.loginActionGroup,QtCore.SIGNAL("triggered(QAction *)"),self.login)
+			
+			
+	def createPendingChatContextMenu(self,itemPosition):
+		self.pendingChatMenu=QtGui.QMenu()
+		self.acceptAction=QtGui.QAction(self)
+		self.acceptAction.setText("Accept Chat")
+		self.pendingChatMenu.addAction(self.acceptAction)
+		self.connect(self.acceptAction,QtCore.SIGNAL("activated()"),self.startChat)
+			
+		self.refuseAction=QtGui.QAction(self)
+		self.refuseAction.setText("Refuse Chat")
+		self.pendingChatMenu.addAction(self.refuseAction)
+		self.connect(self.refuseAction,QtCore.SIGNAL("activated()"),self.chatRefused)
+		
+		
+		
+		self.pendingChatMenu.exec_(self.ui.pendingChatList.mapToGlobal(itemPosition))
+		
+	def createVisitorContextMenu(self,itemPosition):
+		if not self.ui.visitorTableWidget.currentItem():
+			return
+		self.visitorMenu=QtGui.QMenu()
+		
+		self.requestChatAction=QtGui.QAction(self)
+		self.requestChatAction.setText("Request Chat")
+		self.visitorMenu.addAction(self.requestChatAction)
+		self.connect(self.requestChatAction,QtCore.SIGNAL("activated()"),self.requestChat)
+				
+		self.forceChatAction=QtGui.QAction(self)
+		self.forceChatAction.setText("Force Chat")
+		self.visitorMenu.addAction(self.forceChatAction)
+		self.connect(self.forceChatAction,QtCore.SIGNAL("activated()"),self.forceChat)
+		
+		self.visitorMenu.addSeparator()
+		
+		self.historyAction=QtGui.QAction(self)
+		self.historyAction.setText("View History")
+		self.visitorMenu.addAction(self.historyAction)
+		self.connect(self.historyAction,QtCore.SIGNAL("activated()"),self.getHistory)
+		
+		self.visitorMenu.exec_(self.ui.visitorTableWidget.mapToGlobal(itemPosition))
+		
+	
+		
+	def displayChatMessage(self,chatsessionid,message,clientname=''):
+		self.chatWindows[chatsessionid].displayMessage(message,clientname)	
+		
+	def forceChat(self):
+		self.controller.forcechat(self.ui.visitorTableWidget.currentItem().sessionid)
+		QtGui.QMessageBox.information(self,"Live Response","Sent Chat Request\nChat Will begin if visitor accepts request")
+		
+	def endChat(self,chatsessionid):
+		##Delete the chat window iff it has shutdown cleanly
+		while self.chatWindows[chatsessionid].close()!=True:
+			sleep(0.1)
+		
+		del(self.chatWindows[chatsessionid])	
+		
+		
+	
+	def errorMessage(self,message):
+		QtGui.QMessageBox.information(self,"Live Response",QtCore.QString(message))
+		
+		
+	def getHistory(self):
+		historyURL=self.controller.gethistory(self.ui.visitorTableWidget.currentItem().sessionid)
+		import webbrowser
+		webbrowser.open_new(historyURL)
+		
+	def getLoginData(self):
+		userDir=os.path.expanduser('~')
+		fileName=userDir+'/.lrqtrc'
+		if os.path.exists(fileName):
+			##We have data file, try reading it
+			if os.access(fileName,os.R_OK):
+				##We can read file
+				try:
+					profileFile=open(fileName,'rb')
+					self.loginData=pickle.load(profileFile)
+				except:
+					self.errorMessage("Unable to read profile file")
+			else:
+				self.errorMessage("Unable to read profile file")
+		if self.loginData=={}:
+			self.loginDataDialog()
+			
+		
+	def login(self,action):
+		accountName=str(action.text())
+		##Check if we are logged in currentlly, if yes then logout
+		if self.loggedInAccount!='':
+			if self.logout()==-1:
+				return
+		##Connect to server, setup signals. If successful change the menu items
+		self.controller=lrsession(self.loginData[accountName],self)
+		self.connect(self.controller,QtCore.SIGNAL("visitorDataSignal"),self.showVisitorData)
+		self.connect(self.controller,QtCore.SIGNAL("chatStarted"),self.chatStarted)
+		self.connect(self.controller,QtCore.SIGNAL("displayChatMessage"),self.displayChatMessage)
+		self.connect(self.controller,QtCore.SIGNAL("errorSignal"),self.errorMessage)
+		self.connect(self.controller,QtCore.SIGNAL("historySignal"),self.sendHistoryToWindow)
+		self.connect(self.controller,QtCore.SIGNAL("chatStatus"),self.updateChatStatus)
+		
+		
+		if self.controller.login()==0:
+			self.controller.deleteLater
+			self.controller=None
+		else:
+			self.logoutAction.setEnabled(True)
+			self.loggedInAccount=accountName
+			self.awayAction.setEnabled(True)
+			self.activeVisitor=None
+			
+			
+	def loginDataDialog(self):
+		self.loginDataDialogInstance=winloginDataDialog(self.loginData)
+		self.loginDataDialogInstance.exec_()
+		del(self.loginDataDialogInstance)
+		
+	
+	def logout(self):
+		if self.controller:
+			if len(self.chatWindows.keys())>0:
+				if QtGui.QMessageBox.warning(self,"Logout?","Chat sessions are active.\n Are you sure you want to logout?","&Yes","&No")==1:
+					return -1
+			for chat in self.chatWindows.keys():
+				self.chatWindows[chat].close()
+				
+			self.controller.endsession()
+			self.controller.deleteLater()
+			self.controller=None
+			self.loggedInAccount=''
+			
+			self.ui.staffList.clear()
+			self.ui.pendingChatList.clear()
+			self.ui.visitorTableWidget.setRowCount(0)
+			self.ui.visitorChatStatusTextEdit.clear()
+			self.ui.visitorInformationTextEdit.clear()
+			self.onlineAction.setEnabled(False)
+			self.awayAction.setEnabled(False)
+			self.activeVisitor=None
+			
+	
+	def quitLR(self):
+		self.logout()
+		userDir=os.path.expanduser('~')
+		fileName=userDir+'/.lrqtrc'
+		try:
+			profileFile=open(fileName,'wb')
+			pickle.dump(self.loginData,profileFile)
+		except:
+			self.errorMessage("Unable to write to profile file")
+				
+		
+	def requestChat(self):
+		self.controller.requestchat(self.ui.visitorTableWidget.currentItem().sessionid)
+		QtGui.QMessageBox.information(self,"Live Response","Sent Chat Request\nChat Will begin if visitor accepts request")
+	
+	def sendHistoryToWindow(self,chatsessionid,historyData):
+		self.chatWindows[chatsessionid].displayHistory(historyData)
+		
+	def showAboutDialog(self):
+		about=aboutDialog(self)
+		about.show()
+		
+	def showLogWindow(self):
+		logWindow=logDialog(self)
+		logWindow.show()
+	
+	def startChat(self,chatListItemWidget=None):
+		##Case when chat is initiated from context menu
+		if chatListItemWidget==None:
+			chatListItemWidget=self.ui.pendingChatList.currentItem()
+		chatsessionid=chatListItemWidget.sessionid		
+		self.controller.startchat(chatsessionid)
+		
+		
+			
+	def startStaffToStaffChat(self,staffListItemWidget):
+		self.controller.stafftostaffchat(staffListItemWidget.sessionid)
+		
+			
+	def showMainWindow(self):
+		self.show()
+		
+	def showVisitorData(self,parseddata):
+		
+		self.ui.staffList.clear()
+		self.ui.pendingChatList.clear()
+		self.ui.visitorTableWidget.clearContents()
+		self.ui.visitorTableWidget.setRowCount(0)
+		self.staffData=parseddata['staff']
+		
+		for staff in self.staffData.keys():
+			staffName=self.staffData[staff]['staffname']
+			if self.staffData[staff]['status']=='1':
+				customIconListWidgetItem(staff,self.onlineIcon,staffName,self.ui.staffList)
+			elif self.staffData[staff]['status']=='2':
+				customIconListWidgetItem(staff,self.offlineIcon,staffName,self.ui.staffList)
+			else:
+				customIconListWidgetItem(staff,self.awayIcon,staffName,self.ui.staffList)
+		
+		
+		if 'pendingchat' in parseddata.keys():
+			self.pendingChatData=parseddata['pendingchat']
+		else:
+			self.pendingChatData={}
+		
+		for chatrequest in self.pendingChatData.keys():
+			pendingChatName=self.pendingChatData[chatrequest]['displayname']
+			self.activePendingChatSession=customListWidgetItem(chatrequest,pendingChatName,self.ui.pendingChatList)
+			self.trayIcon.showMessage("Chat Alert",pendingChatName+" would like to chat")
+			
+		if 'visitor' in parseddata.keys():
+			self.visitorData=parseddata['visitor']
+		else:
+			self.visitorData={}
+		rowCount=0
+		for visitor in self.visitorData:
+			self.ui.visitorTableWidget.insertRow(rowCount)
+			self.ui.visitorTableWidget.setItem(rowCount,0,customTableWidgetItem(visitor,self.visitorData[visitor]['chatterid']))
+			self.ui.visitorTableWidget.setItem(rowCount,1,customTableWidgetItem(visitor,self.visitorData[visitor]['state'].replace('NULL','')))
+			self.ui.visitorTableWidget.setItem(rowCount,2,customTableWidgetItem(visitor,self.visitorData[visitor]['department'].replace('NULL','')))
+			self.ui.visitorTableWidget.setItem(rowCount,3,customTableWidgetItem(visitor,self.visitorData[visitor]['chatstaffname'].replace('NULL','')))
+			self.ui.visitorTableWidget.setItem(rowCount,4,customTableWidgetItem(visitor,self.visitorData[visitor]['waittime'].replace('NULL','')))
+			self.ui.visitorTableWidget.setItem(rowCount,5,customTableWidgetItem(visitor,self.visitorData[visitor]['currentpage']))
+			self.ui.visitorTableWidget.setItem(rowCount,6,customTableWidgetItem(visitor,self.visitorData[visitor]['country'].replace('NULL','')))
+		
+	def updateChatStatus(self,visitorsessionid,data):
+		##First check that the active visitor is the one for which we received the data
+		if self.activeVisitor.sessionid==visitorsessionid:
+			self.ui.visitorChatStatusTextEdit.setText(data.decode('utf8'))
+		
+	def updateVisitorTabWidget(self,currentIndex=-1):
+		if self.activeVisitor!=None:
+			if currentIndex==-1:
+				currentIndex=self.ui.visitorTabWidget.currentIndex()
+			currentTab=self.ui.visitorTabWidget.tabText(currentIndex)
+			if currentTab=='Information':
+				raw_data=self.visitorData[self.activeVisitor.sessionid]
+				
+				self.ui.visitorInformationTextEdit.setText("<b>Current Page: </b>%s<br/>"%(raw_data['currentpage']))
+				self.ui.visitorInformationTextEdit.append("<b>Page Title: </b>%s<br/>"%(raw_data['pagetitle']))
+				self.ui.visitorInformationTextEdit.append("<b>Last Visit: </b>%s<br/>"%(raw_data['lastvisit'].replace('false','')))
+				self.ui.visitorInformationTextEdit.append("<b>Operating System: </b>%s<br/>"%(raw_data['operatingsys']))
+				self.ui.visitorInformationTextEdit.append("<b>IP address: </b>%s<br/>"%(raw_data['ipaddress']))
+				self.ui.visitorInformationTextEdit.append("<b>Hostname: </b>%s<br/>"%(raw_data['hostname'].replace('NULL','')))
+			elif currentTab=='Chat Status':
+				self.controller.getchatstatus(self.activeVisitor.sessionid)
+			
+	
+	def visitorSelected(self,visitorTableWidgetItem):
+		
+		if self.activeVisitor!=visitorTableWidgetItem:
+			self.activeVisitor=visitorTableWidgetItem		
+		self.updateVisitorTabWidget()
+				
+	def trayMessageClicked(self):
+		self.startChat(self.activePendingChatSession)
+		
+if __name__ == '__main__':
+    app = QtGui.QApplication(sys.argv)
+    win = winlrMainWindow()
+    QtCore.QObject.connect(win.exitAction,QtCore.SIGNAL("activated()"),app,QtCore.SLOT("quit()"))
+    QtGui.QApplication.setQuitOnLastWindowClosed(False);
+    win.show()
+    app.exec_()
